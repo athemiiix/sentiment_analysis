@@ -161,8 +161,278 @@ tidy_books %>%
 ```
 
 ```{r}
-PandP_sentences <- tibble(text = pride)
+PandP_sentences <- tibble(text = prideprejudice) %>%
+  unnest_tokens(sentence, text, token = "sentences")
+
+PandP_sentences$sentence[2]
 ```
+
+```{r}
+austen_chapters <- austen_books() %>% 
+  group_by(book) %>% 
+  unnest_tokens(chapter, text, token = "regex",
+                pattern = "Chapter|CHAPTER [\\dIVXLC]") %>% 
+  ungroup()
+
+austen_chapters %>% 
+  group_by(book) %>% 
+  summarise(chapters = n())
+
+```
+
+```{r}
+#find the number of negative words in each chapter and divide by the total words in each chapter.
+#for each book, which chapter has the highest proportion of negative words?
+
+bingnegative <- get_sentiments("bing") %>% 
+  filter(sentiment == "negative")
+
+wordcounts <- tidy_books %>% 
+  group_by(book, chapter) %>% 
+  summarize(words = n())
+
+tidy_books %>% 
+  semi_join(bingnegative) %>% 
+  group_by(book, chapter) %>% 
+  summarize(negativewords = n()) %>% 
+  left_join(wordcounts, by = ("book", "chapter")) %>% 
+  mutate(ratio = negativewords/words) %>% 
+  filter(chapter != 0) %>% 
+  top_n(1) %>% 
+  ungroup()
+```
+
+#Chapter 3: Analyzing word and document frequency
+
+```{r}
+#The statistic tf-idf is intended to measure how important a word is to a document in a collection (or corpus) of documents, for example, to one novel in a collection of novels or to one website in a collection of websites. 
+
+#idf(term) = ln(n_documents / n_documents containing term)
+
+#term frequency in Jane Austen's novels
+
+library(dplyr)
+library(janeaustenr)
+library(tidytext)
+
+book_words <- austen_books() %>% 
+  unnest_tokens(word, text) %>% 
+  count(book, word, sort = TRUE)
+
+total_words <- book_words %>% 
+  group_by(book) %>% 
+  summarize(total = sum(n))
+
+book_words <- left_join(book_words, total_words)
+
+book_words
+
+#one row in this book_words df for each word-book combination; n is the number of times that word is used, and the total is total words in that books. The stop words are the usual suspects... let's viz
+
+library(ggplot2)
+
+ggplot(book_words, aes(n/total, fill = book)) +
+  geom_histogram(show.legend = FALSE) +
+  xlim(NA, 0.0009) +
+  facet_wrap(~book, ncol = 2, scales = "free_y")
+
+
+#these distributions are common in texts- the long tails are the rare words we are interested in.
+
+```
+
+```{r}
+#Zipf's law states that the frequency that a word appears is inversely proportional to its rank.
+#examine Zipf's law for Jane Austen's novels using dplyr
+
+freq_by_rank <- book_words %>% 
+  group_by(book) %>% 
+  mutate(rank = row_number(),
+         `term frequency` = n/total)
+
+freq_by_rank
+
+#rank tells us the rank of each word within the ferquency table; the table was already ordered by n, so we could use row_number() to find the rank. We can calculate the term frequency the same way we did before. Visualize Zipf's law by plotting rank on x-axis and term frequency on y-axis, using log scales. Plotting this way, an inversely proportional relationship will have a constant, negative slope.
+
+freq_by_rank %>% 
+  ggplot(aes(rank, `term frequency`, color = book)) + 
+  geom_line(size = 1.1, alpha = 0.8, show.legend = FALSE) + 
+  scale_x_log10() +
+  scale_y_log10()
+
+#let's see the middle of the range
+
+rank_subset <- freq_by_rank %>% 
+  filter(rank < 500,
+         rank > 10)
+
+lm(log10(`term frequency`) ~ log10(rank), data = rank_subset)
+#classic versions of Zipf's law have frequency (infinity) 1/rank - and we have in fact gotten a slope close to -1 (good). Let's plot this fitted power law with the data in Figure 3.3 to see how it looks
+
+freq_by_rank %>% 
+  ggplot(aes(rank, `term frequency`, color = book)) +
+  geom_abline(intercept = -0.62, slope = -1.1, color = "gray50", linetype = 2) +
+  geom_line(size = 1.1, alpha = 0.8, show.legend = FALSE) +
+  scale_x_log10() +
+  scale_y_log10()
+```
+
+
+```{r}
+#the bind_tf_idf function
+
+#the idea of tf-idf is to find the important words for the content of each document by decreasing the weight of commonly used words and increasing the weight for words that are not used very much in a collection (or "corpus") of documents - in this case, Jane Austen's novels as a whole. Calculating tf-idf attempts to find the words that are important (i.e. common) in a text, but not _too_ common. let's do that now.
+
+#the bind_tf_idf function takes a tidy text dataset as input with one row per token (term) per document. One column (word here) contains the terms/tokens, one column contains the documents (book in this case), and the last necessary column contains the counts - how many times each document contains each term (n in this example). We calculated a total for each book from our explorations in previous sections, but it is not necessary for the bind_tf_idf function; the table only needs to contain all the words in each document.
+
+book_words <- book_words %>% 
+  bind_tf_idf(word, book, n)
+
+book_words
+
+#tf-idf is 0 for the most common words. let's arrange from the highest tf-idf (rarest words)
+
+book_words %>% 
+  select(-total) %>% 
+  arrange(desc(tf_idf))
+
+#now we see the proper nouns used the most - e.g. names such as elinor and marianne
+#lets viz
+
+book_words %>% 
+  mutate(word = factor(word, levels = rev(unique(word)))) %>% 
+  group_by(book) %>% 
+  top_n(15) %>% 
+  ungroup() %>% 
+  ggplot(aes(word, tf_idf, fill = book)) +
+  geom_col(show.legend = FALSE) +
+  labs(x = NULL, y = "tf-idf") +
+  facet_wrap(~book, ncol=2, scales = "free") +
+  coord_flip()
+
+
+```
+
+```{r}
+#a corpus of physics texts
+
+#leaving fiction
+
+librarY(gutenbergr)
+
+physics <- gutenberg_download(c(37729, 14725, 13476, 30155),
+                              meta_fields = "author")
+
+#now that we have texts, use unnest_tokens() and count() to find out how many times each word was used in each text
+
+physics_words <- physics %>% 
+  unnest_tokens(word, text) %>% 
+  count(author, word, sort = TRUE)
+
+physics_words
+
+#calc tf-idf and viz
+
+library(forcats)
+
+plot_physics <- physics_words %>% 
+  bind_tf_idf(word, author, n) %>% 
+  mutate(word = fct_reorder(word, tf_idf)) %>% 
+  mutate(author = factor(author, levels = c("Galilei, Galileo",
+                                            "Huygens, Christaan",
+                                            "Tesla, Nikola",
+                                            "Einstein, Albert")))
+
+
+plot_physics %>% 
+  group_by(author) %>% 
+  top_n(15, tf_idf) %>% 
+  ungroup() %>% 
+  mutate(word = reodrer(word, tf_idf)) %>% 
+  ggplot(aes(word, tf_idf, fill = author)) +
+  geom_col(show.legened = FALSE) +
+  labs(x = NULL, y = "tf-idf") +
+  facet_wrap(~author, ncol = 2, scales = "free") +
+  coord_flip()
+
+library(stringr)
+
+physics %>% 
+  filter(str_detect(text, "_k_")) %>% 
+  select(text)
+
+physics %>% 
+  filter(str_detect(text, "RC")) %>% 
+  select(text)
+
+#cleaning of the text is in order. We have to come up with our own custom stop words to strip
+
+mystopwords <- tibble(word = c("eq", "co", "rc", "ac", "ak", "bn",
+                               "fig", "file", "cg", "cb", "cm",
+                               "ab", "_k", "_k_", "_x"))
+
+physics_words <- anti_join(physics_words, mystopwords, by = "word")
+
+plot_physics <- physics_words %>% 
+  bind_tf_idf(word, author, n) %>% 
+  group_by(author) %>% 
+  top_n(15, tf_idf) %>% 
+  ungroup() %>% 
+  mutate(word = reorder_within(word, tf_idf, author)) %>% 
+  mutate(author = factor(author, levels = c("Galilei, Galileo",
+                                            "Huygens, Christaan",
+                                            "Tesla, Nikola",
+                                            "Einstein, Albert")))
+
+ggplot(plot_physics, aes(word, tf_idf, fill = author)) +
+  geom_col(show.legend = FALSE) +
+  labs(x = NULL, y = "tf-idf") +
+  facet_wrap(~author, ncol = 2, scales = "free") +
+  coord_flip() +
+  scale_x_reordered()
+
+
+#one thing we can conclude is that we don't hear enough about ramparts or things being ethereal in physics today
+  
+
+
+```
+
+```{r}
+#4 Relationships between words - n-grams
+
+#explore methods tidytext offers for calculating / viz relations between words in text dataset - including the token = "ngrams" argument - tokenizes by pairs of adjacent words rather than by individual ones.
+
+#tokenizing by n-gram
+
+#so far, we've been using unnest_tokens to tokenize by word, or sometimes by sentence, which is useful for the kinds of sentiment and frequency analyses we've done so far. But, we can also use the function to tokenize into consecutive sequences of words, caled __n-grams__. By seeing how often word X is followed by word Y, we can then build a model of the relationships between them.
+
+#we do this by adding the token = "ngrams" option to unnest_tokens() and setting n to the number of words we wish to capture in each n-gram. When we set n to 2, we are examining pairs of two consecutie words, often called "bigrams"
+
+library(dplyr)
+library(tidytext)
+library(janeaustenr)
+
+austen_bigrams <- austen_books() %>% 
+  unnest_tokens(bigram, text, token = "ngrams", n = 2)
+
+austen_bigrams
+
+
+#counting and filtering n-grams
+
+austen_bigrams %>% 
+  count(bigram, sort = TRUE)
+
+
+```
+
+
+
+
+
+
+
 
 
 
